@@ -181,6 +181,6 @@ if st.button("Predict Risk", type="primary"):
             "Weight": np.abs(coefficients)
         }).sort_values("Weight", ascending=False).head(5)
 
-        st.bar_chart(coef_df.set_indpython -m streamlit run your_app.pyex("Feature"))
+        st.bar_chart(coef_df.set_index("Feature"))
 
     st.caption("This tool is for educational purposes only. Always consult a medical professional.")
