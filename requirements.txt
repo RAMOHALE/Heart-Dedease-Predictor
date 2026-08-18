@@ -2,3 +2,6 @@ streamlit
 pandas
 scikit-learn
 matplotlib
+plotly
+requests
+allratestoday

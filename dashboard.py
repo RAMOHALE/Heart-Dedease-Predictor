@@ -8,6 +8,11 @@ import sys
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+try:
+    from allratestoday import AllRatesToday
+    HAS_ALLRATES = True
+except ImportError:
+    HAS_ALLRATES = False
 
 # ==========================================
 # 0. LOGGING SETUP
@@ -33,6 +38,66 @@ logger.info("App started.")
 # ==========================================
 
 DATA360_BASE_URL = "https://data360api.worldbank.org"
+
+# ==========================================
+# EXCHANGE RATE FETCHING
+# ==========================================
+
+@st.cache_data(ttl=3600)
+def get_live_exchange_rates():
+    """
+    Fetch live exchange rates using allratestoday API.
+    Falls back to 2019 rates if API fails.
+    """
+    fallback_rates = {
+        'ZAF': ('ZAR', 'R', 14.47),
+        'NGA': ('NGN', '₦', 360.73),
+        'BWA': ('BWP', 'P', 10.65),
+        'LSO': ('LSL', 'L', 14.47),
+        'MOZ': ('MZN', 'MT', 62.55),
+        'RWA': ('RWF', 'Fr', 895.83),
+        'SYC': ('SCR', '₨', 13.64),
+        'UGA': ('UGX', 'Sh', 3695.75),
+        'ZMB': ('ZMW', 'ZK', 13.23),
+        'ZWE': ('ZWL', '$', 79.65)
+    }
+    
+    if not HAS_ALLRATES:
+        logger.warning("[exchange] allratestoday not installed. Using fallback rates.")
+        return fallback_rates
+    
+    try:
+        client = AllRatesToday()
+        live_rates = {}
+        
+        currency_map = {
+            'ZAF': ('ZAR', 'R'),
+            'NGA': ('NGN', '₦'),
+            'BWA': ('BWP', 'P'),
+            'LSO': ('LSL', 'L'),
+            'MOZ': ('MZN', 'MT'),
+            'RWA': ('RWF', 'Fr'),
+            'SYC': ('SCR', '₨'),
+            'UGA': ('UGX', 'Sh'),
+            'ZMB': ('ZMW', 'ZK'),
+            'ZWE': ('ZWL', '$')
+        }
+        
+        for country_code, (curr_code, symbol) in currency_map.items():
+            try:
+                result = client.get_rate("USD", curr_code)
+                rate = result.get('rate', fallback_rates[country_code][2])
+                live_rates[country_code] = (curr_code, symbol, float(rate))
+                logger.info(f"[exchange] {country_code} ({curr_code}): 1 USD = {rate}")
+            except Exception as e:
+                logger.warning(f"[exchange] Failed to fetch {country_code}: {e}")
+                live_rates[country_code] = fallback_rates[country_code]
+        
+        return live_rates
+    
+    except Exception as e:
+        logger.error(f"[exchange] Failed to initialize AllRatesToday: {e}")
+        return fallback_rates
 
 @st.cache_data
 def get_worldbank_data(indicator_dot_code, country_codes, year=2019):
@@ -154,7 +219,10 @@ with col2:
 st.divider()
 st.subheader("Country Statistics")
 
-# Create a mapping of country codes to full names, currencies, and exchange rates
+# Fetch live exchange rates
+country_currencies = get_live_exchange_rates()
+
+# Create a mapping of country codes to full names
 country_names = {
     'ZAF': 'South Africa',
     'NGA': 'Nigeria',
@@ -166,20 +234,6 @@ country_names = {
     'UGA': 'Uganda',
     'ZMB': 'Zambia',
     'ZWE': 'Zimbabwe'
-}
-
-# Currency info: (Currency Code, Symbol, 2019 Exchange Rate to USD)
-country_currencies = {
-    'ZAF': ('ZAR', 'R', 14.47),      # South African Rand
-    'NGA': ('NGN', '₦', 360.73),     # Nigerian Naira
-    'BWA': ('BWP', 'P', 10.65),      # Botswana Pula
-    'LSO': ('LSL', 'L', 14.47),      # Lesotho Loti
-    'MOZ': ('MZN', 'MT', 62.55),     # Mozambique Metical
-    'RWA': ('RWF', 'Fr', 895.83),    # Rwanda Franc
-    'SYC': ('SCR', '₨', 13.64),      # Seychelles Rupee
-    'UGA': ('UGX', 'Sh', 3695.75),   # Uganda Shilling
-    'ZMB': ('ZMW', 'ZK', 13.23),     # Zambia Kwacha
-    'ZWE': ('ZWL', '$', 79.65)       # Zimbabwe Dollar
 }
 
 # Country selector
@@ -230,6 +284,7 @@ if selected_country_code:
     
     # Show exchange rate info
     with st.expander("Exchange Rate Information"):
-        st.info(f"**{currency_code}** ({currency_symbol}) - 2019 Average Exchange Rate: **1 USD = {exchange_rate:.2f} {currency_code}**")
+        rate_source = "Live Rate" if HAS_ALLRATES else "Fallback (2019 Average)"
+        st.info(f"**{currency_code}** ({currency_symbol}) - {rate_source}: **1 USD = {exchange_rate:.4f} {currency_code}**")
 
 logger.info("[main] App rendered successfully.")
