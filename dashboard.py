@@ -7,6 +7,7 @@ import os
 import sys
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==========================================
 # 0. LOGGING SETUP
@@ -36,20 +37,13 @@ DATA360_BASE_URL = "https://data360api.worldbank.org"
 @st.cache_data
 def get_worldbank_data(indicator_dot_code, country_codes, year=2019):
     """
-    Fetch indicator values from the World Bank Data360 API
-    (https://data360.worldbank.org/en/api), which replaces the legacy
-    api.worldbank.org endpoint.
-
-    indicator_dot_code: WDI-style code, e.g. 'NY.GDP.MKTP.CD'
-    year: TIME_PERIOD to request, kept aligned with the 2019 health data
-          so GDP/population/CVD are all comparing the same year.
+    Fetch indicator values from the World Bank Data360 API in parallel.
+    Uses ThreadPoolExecutor to fetch multiple countries concurrently.
     """
-    # Data360 indicator IDs are WDI codes with dots replaced by underscores,
-    # prefixed with the database ID (WB_WDI).
     data360_indicator = "WB_WDI_" + indicator_dot_code.replace(".", "_")
-
-    results = {}
-    for code in country_codes:
+    
+    def fetch_country(code):
+        """Fetch data for a single country with retry logic."""
         params = {
             "DATABASE_ID": "WB_WDI",
             "INDICATOR": data360_indicator,
@@ -57,35 +51,43 @@ def get_worldbank_data(indicator_dot_code, country_codes, year=2019):
             "TIME_PERIOD": str(year),
         }
         
-        # Retry logic with exponential backoff
         max_retries = 3
         for attempt in range(max_retries):
             try:
                 response = requests.get(f"{DATA360_BASE_URL}/data360/data", params=params, timeout=30)
-                logger.info(f"[worldbank] {indicator_dot_code} / {code} -> HTTP {response.status_code} | url={response.url}")
+                logger.info(f"[worldbank] {indicator_dot_code} / {code} -> HTTP {response.status_code}")
                 response.raise_for_status()
                 payload = response.json()
                 records = payload.get("value", [])
                 if records:
                     val = records[0].get("OBS_VALUE")
-                    results[code] = float(val) if val is not None else 0
-                    logger.info(f"[worldbank] {indicator_dot_code} / {code} -> value={results[code]}")
+                    result = float(val) if val is not None else 0
+                    logger.info(f"[worldbank] {indicator_dot_code} / {code} -> value={result}")
+                    return code, result
                 else:
-                    results[code] = 0
-                    logger.warning(f"[worldbank] {indicator_dot_code} / {code} -> 0 records returned for TIME_PERIOD={year}")
-                break  # Success, exit retry loop
+                    logger.warning(f"[worldbank] {indicator_dot_code} / {code} -> 0 records returned")
+                    return code, 0
             except requests.exceptions.Timeout:
-                logger.warning(f"[worldbank] TIMEOUT fetching {indicator_dot_code} for {code} (attempt {attempt + 1}/{max_retries})")
+                logger.warning(f"[worldbank] TIMEOUT {indicator_dot_code} / {code} (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                    time.sleep(wait_time)
+                    time.sleep(2 ** attempt)
                 else:
-                    logger.error(f"[worldbank] FAILED after {max_retries} retries for {indicator_dot_code} / {code}")
-                    results[code] = 0
+                    logger.error(f"[worldbank] FAILED after {max_retries} retries: {indicator_dot_code} / {code}")
+                    return code, 0
             except Exception as e:
-                logger.error(f"[worldbank] FAILED fetching {indicator_dot_code} for {code}: {e}")
-                results[code] = 0
-                break  # Don't retry on non-timeout errors
+                logger.error(f"[worldbank] ERROR {indicator_dot_code} / {code}: {e}")
+                return code, 0
+        
+        return code, 0
+    
+    # Fetch all countries in parallel (max 5 concurrent requests)
+    results = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(fetch_country, code): code for code in country_codes}
+        for future in as_completed(futures):
+            code, value = future.result()
+            results[code] = value
+    
     return results
 
 # ==========================================
@@ -144,5 +146,90 @@ with col2:
                               color='Country', hover_name='Country',
                               title="GDP vs. Hypertension Rate")
     st.plotly_chart(fig_scatter, use_container_width=True)
+
+# ==========================================
+# 5. COUNTRY STATS SECTION
+# ==========================================
+
+st.divider()
+st.subheader("Country Statistics")
+
+# Create a mapping of country codes to full names, currencies, and exchange rates
+country_names = {
+    'ZAF': 'South Africa',
+    'NGA': 'Nigeria',
+    'BWA': 'Botswana',
+    'LSO': 'Lesotho',
+    'MOZ': 'Mozambique',
+    'RWA': 'Rwanda',
+    'SYC': 'Seychelles',
+    'UGA': 'Uganda',
+    'ZMB': 'Zambia',
+    'ZWE': 'Zimbabwe'
+}
+
+# Currency info: (Currency Code, Symbol, 2019 Exchange Rate to USD)
+country_currencies = {
+    'ZAF': ('ZAR', 'R', 14.47),      # South African Rand
+    'NGA': ('NGN', '₦', 360.73),     # Nigerian Naira
+    'BWA': ('BWP', 'P', 10.65),      # Botswana Pula
+    'LSO': ('LSL', 'L', 14.47),      # Lesotho Loti
+    'MOZ': ('MZN', 'MT', 62.55),     # Mozambique Metical
+    'RWA': ('RWF', 'Fr', 895.83),    # Rwanda Franc
+    'SYC': ('SCR', '₨', 13.64),      # Seychelles Rupee
+    'UGA': ('UGX', 'Sh', 3695.75),   # Uganda Shilling
+    'ZMB': ('ZMW', 'ZK', 13.23),     # Zambia Kwacha
+    'ZWE': ('ZWL', '$', 79.65)       # Zimbabwe Dollar
+}
+
+# Country selector
+selected_country_code = st.selectbox(
+    "Select a country to view detailed statistics:",
+    options=african_countries,
+    format_func=lambda code: country_names.get(code, code)
+)
+
+# Get data for selected country
+if selected_country_code:
+    country_row = df[df['Country'] == selected_country_code].iloc[0]
+    country_full_name = country_names.get(selected_country_code, selected_country_code)
+    currency_code, currency_symbol, exchange_rate = country_currencies.get(selected_country_code, ('USD', '$', 1.0))
+    
+    # Display stats in columns
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("Country", country_full_name)
+    
+    with col2:
+        st.metric("Population", f"{country_row['Population']:,.0f}")
+    
+    with col3:
+        st.metric("Hypertension Rate", f"{country_row['Hypertension_Rate']:.1f}%")
+    
+    col4, col5, col6 = st.columns(3)
+    
+    with col4:
+        gdp_billions_usd = country_row['GDP_USD'] / 1_000_000_000
+        gdp_native = gdp_billions_usd * exchange_rate
+        st.metric(f"GDP ({currency_code})", f"{currency_symbol}{gdp_native:.2f}B")
+    
+    with col5:
+        if country_row['Population'] > 0:
+            gdp_per_capita_usd = country_row['GDP_USD'] / country_row['Population']
+            gdp_per_capita_native = gdp_per_capita_usd * exchange_rate
+            st.metric(f"GDP per Capita ({currency_code})", f"{currency_symbol}{gdp_per_capita_native:,.0f}")
+        else:
+            st.metric(f"GDP per Capita ({currency_code})", "N/A")
+    
+    with col6:
+        # Calculate health burden score (higher = worse)
+        pop_millions = country_row['Population'] / 1_000_000
+        health_burden = (country_row['Hypertension_Rate'] / 100) * pop_millions
+        st.metric("Estimated Hypertension Cases (millions)", f"{health_burden:.2f}M")
+    
+    # Show exchange rate info
+    with st.expander("Exchange Rate Information"):
+        st.info(f"**{currency_code}** ({currency_symbol}) - 2019 Average Exchange Rate: **1 USD = {exchange_rate:.2f} {currency_code}**")
 
 logger.info("[main] App rendered successfully.")
