@@ -1,4 +1,12 @@
 import streamlit as st
+from pathlib import Path
+
+# Keep the original entry point connected to the integrated application.
+if __name__ == "__main__":
+    dashboard_path = Path(__file__).with_name("dashboard.py")
+    exec(compile(dashboard_path.read_text(encoding="utf-8"), str(dashboard_path), "exec"))
+    st.stop()
+
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
